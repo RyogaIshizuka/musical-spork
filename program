@@ -1,0 +1,995 @@
+# 1_coordinateファイルに２１個のランドマークのx, y, z座標を保存する
+# 1_distanceファイルにThumbとIndexのTIP, DIP, PIP, MCPの距離を保存する
+# 1_speedファイルにThumbとIndexのTIP, DIP, PIP, MCPのフレームごとの速さを保存する
+# 1_angleファイルにランドマーク1-3, 2-4, 0-6, 5-7, 6-8間の角度を保存する
+# Show graphで直前に保存した距離，速さ，角度データのグラフを描画する
+
+# キャリブレーション前のランドマーク0-17間の初期距離は74mm
+
+###  フィンガータップテストの動作を計測
+
+import copy
+import argparse
+import cv2 as cv
+import numpy as np
+import mediapipe as mp
+from utils import CvFpsCalc
+from matplotlib import pyplot as plt
+import csv
+import time
+import datetime
+import pandas as pd
+import PySimpleGUI as sg
+import math
+
+def get_args():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--device", type=int, default=0)
+    parser.add_argument("--width", help='cap width', type=int, default=640)
+    parser.add_argument("--height", help='cap height', type=int, default=360)
+
+    parser.add_argument("--model_complexity",
+                        help='model_complexity(0,1(default))',
+                        type=int,
+                        default=1)
+
+    parser.add_argument("--max_num_hands", type=int, default=1)
+    parser.add_argument("--min_detection_confidence",
+                        help='min_detection_confidence',
+                        type=float,
+                        default=0.7)
+    parser.add_argument("--min_tracking_confidence",
+                        help='min_tracking_confidence',
+                        type=int,
+                        default=0.5)
+
+    args = parser.parse_args()
+
+    return args
+
+
+def main():
+    data_list = []
+    distance_list = []
+    speed_list = []
+    angle_list = []
+    from_camera = []
+
+
+    sg.theme("LightBrown6")
+
+    layout = [  [sg.Text('Movie Capture', font=('Helvetica', 20), enable_events=True, key='-text-')],
+                [sg.Button('Practice', size=(10,1), font=('Helvetica', 14), key='-practice-'),
+                 sg.Button('Setting', size=(10,1), font=('Helvetica', 14), key='-set-'),
+                 sg.Text('           ', font=(20)),
+                 sg.Text('', font=('Helvetica', 20), key='-count-')],
+                [sg.Button('Start', size=(10,1), font=('Helvetica', 14), key='-start-'),
+                 sg.Button('Stop', size=(10,1), font=('Helvetica', 14), key='-stop-'),
+                 sg.Button('Exit', size=(10,1), font=('Helvetica', 14), key='-exit-'),
+                 sg.Button('Show graph', size=(15,1), font=('Helvetica', 14), key='-show-')],
+                [sg.Image(key='-image-')]]
+
+    window = sg.Window('FT Measurement System', layout = layout, location=(625, 200), resizable=True)
+
+    recording = False
+    practice = False
+
+    global display_fps
+    global standard_length, tap_count1, tap_count2, tap_count
+    standard_length = 0
+    tap_count1 = 0
+    tap_count2 = 0
+    tap_count = 0
+
+    while True:
+        # 引数解析 #################################################################
+        args = get_args()
+
+        cap_device = args.device
+        cap_width = args.width
+        cap_height = args.height
+
+        model_complexity = args.model_complexity
+
+        max_num_hands = args.max_num_hands
+        min_detection_confidence = args.min_detection_confidence
+        min_tracking_confidence = args.min_tracking_confidence
+
+
+        event, value = window.read(timeout=0)
+
+        if event == sg.WIN_CLOSED or event == '-exit-':
+            break
+
+        if event == '-start-':
+            window['-text-'].update('Live')
+            window['-count-'].update('Counter', text_color='DeepPink')
+
+            count = 0
+            tap_count2 = 0
+            global landmark_1, landmark_2, landmark_3, landmark_4, landmark_5, landmark_6, landmark_7, landmark_8, time_list
+            landmark_1 = []
+            landmark_2 = []
+            landmark_3 = []
+            landmark_4 = []
+            landmark_5 = []
+            landmark_6 = []
+            landmark_7 = []
+            landmark_8 = []
+            time_list = []
+            calibration_list = []
+            
+
+            #CSVに保存するTime  と　CSVのファイル名に使う
+            now = datetime.datetime.now()
+            nowtime = now.strftime('%Y%m%d-%H%M%S')
+            nowtime = str(nowtime)
+            data_csv = nowtime+'.csv'
+            print(data_csv)
+
+            #ファイルのパスとファイル名を決定する
+            global path, path2, path3, path4, path5
+            """
+            path = 'C:\\Users\\Ryoga Ishizuka\\Documents\\４年\\Program\\Measurement\\1_FT_Test\\Coordinate' + data_csv
+            path2 = 'C:\\Users\\Ryoga Ishizuka\\Documents\\４年\\Program\\Measurement\\1_FT_Test\\Distance\\' + data_csv
+            path3 = 'C:\\Users\\Ryoga Ishizuka\\Documents\\４年\\Program\\Measurement\\1_FT_Test\\Speed\\' + data_csv
+            path4 = 'C:\\Users\\Ryoga Ishizuka\\Documents\\４年\\Program\\Measurement\\1_FT_Test\\Angle\\' + data_csv
+            path5 = 'C:\\Users\\Ryoga Ishizuka\\Documents\\４年\\Program\\Measurement\\1_FT_Test\\From_camera\\' + data_csv
+            """
+            path = 'C:\\Users\\Ryoga Ishizuka\\Documents\\４年\\Program\\Practice\\1_coordinate\\' + data_csv
+            path2 = 'C:\\Users\\Ryoga Ishizuka\\Documents\\４年\\Program\\Practice\\1_distance\\' + data_csv
+            path3 = 'C:\\Users\\Ryoga Ishizuka\\Documents\\４年\\Program\\Practice\\1_speed\\' + data_csv
+            path4 = 'C:\\Users\\Ryoga Ishizuka\\Documents\\４年\\Program\\Practice\\1_angle\\' + data_csv
+            path5 = 'C:\\Users\\Ryoga Ishizuka\\Documents\\４年\\Program\\Practice\\from_camera\\' + data_csv
+
+            with open(path, 'w', newline='') as f:
+                writer = csv.writer(f, delimiter=',')
+                writer.writerow(['Time','WRIST.x','WRIST.y','WRIST.z','THUMB_CMC.x','THUMB_CMC.y','THUMB_CMC.z','THUMB_MCP.x','THUMB_MCP.y','THUMB_MCP.z','THUMB_IP.x','THUMB_IP.y','THUMB_IP.z','THUMB_TIP.x','THUMB_TIP.y','THUM_TIP.z',
+                                'INDEX_MCP.x','INDEX_MCP.y','INDEX_MCP.z','INDEX_PIP.x','INDEX_PIP.y','INDEX_PIP.z','INDEX_DIP.x','INDEX_DIP.y','INDEX_DIP.z','INDEX_TIP.x','INDEX_TIP.y','INDEX_TIP.z',
+                                'MIDDLE_MCP.x','MIDDLE_MCP.y','MIDDLE_MCP.z','MIDDLE_PIP.x','MIDDLE_PIP.y','MIDDLE_PIP.z','MIDDLE_DIP.x','MIDDLE_DIP.y','MIDDLE_DIP.z','MIDDLE_TIP.x','MIDDLE_TIP.y','MIDDLE_TIP.z',
+                                'RING_MCP.x','RING_MCP.y','RING_MCP.z','RING_PIP.x','RING_PIP.y','RING_PIP.z','RING_DIP.x','RING_DIP.y','RING_DIP.z','RING_TIP.x','RING_TIP.y','RING_TIP.z',
+                                'PINKY_MCP.x','PINKY_MCP.y','PINKY_MCP.z','PINKY_PIP.x','PINKY_PIP.y','PINKY_PIP.z','PINKY_DIP.x','PINKY_DIP.y','PINKY_DIP.z','PINKY_TIP.x','PINKY_TIP.y','PINKY_TIP.z'])
+
+            with open(path2, 'w', newline='') as f:
+                writer = csv.writer(f, delimiter=',')
+                writer.writerow(['Time','Tip_distance','Dip_distance','Pip_distance','Mcp_distance'])
+
+            with open(path3, 'w', newline='') as f:
+                writer = csv.writer(f, delimiter=',')
+                writer.writerow(['Time','Thumb_mcp_speed','Thumb_pip_speed','Thumb_dip_speed','Thumb_tip_speed','Index_mcp_speed','Index_pip_speed','Index_dip_speed','Index_tip_speed'])
+
+            with open(path4, 'w', newline='') as f:
+                writer = csv.writer(f, delimiter=',')
+                writer.writerow(['Time','Thumb_pip_angle','Thumb_dip_angle','Index_mcp_angle','Index_pip_angle','Index_dip_angle'])
+
+            with open(path5, 'w', newline='') as f:
+                writer = csv.writer(f, delimiter=',')
+                writer.writerow(['Time','From camera', 'FPS','Calibration'])
+
+            if len(calibration_list) >= 1:
+                with open(path5, 'a', newline='') as f:
+                    writer = csv.writer(f, delimiter=',')
+                    writer.writerow(calibration_list)
+
+            # カメラ準備 ###############################################################
+            cap = cv.VideoCapture(cap_device)
+            cap.set(cv.CAP_PROP_FRAME_WIDTH, cap_width)
+            cap.set(cv.CAP_PROP_FRAME_HEIGHT, cap_height)
+            cap.set(cv.CAP_PROP_FPS, 60)
+
+            # モデルロード #############################################################
+            mp_hands = mp.solutions.hands
+            hands = mp_hands.Hands(
+                model_complexity=model_complexity,
+                max_num_hands=max_num_hands,
+                min_detection_confidence=min_detection_confidence,
+                min_tracking_confidence=min_tracking_confidence,
+            )
+
+            # FPS計測モジュール ########################################################
+            cvFpsCalc = CvFpsCalc(buffer_len=10)
+
+            recording = True
+            practice = False
+
+        if event == '-stop-':
+            window['-text-'].update('Stop')
+
+            recording = False
+            practice = False
+
+            cap.release()
+            cv.destroyAllWindows()
+
+        if event == '-show-':
+            window['-text-'].update('Look graph')
+
+            recording = False
+            practice = False
+
+            cap.release()
+            cv.destroyAllWindows()
+
+            popup_graph(path2, path3, path4)
+
+
+        if event == '-practice-':
+            window['-text-'].update('Practice')
+            window['-count-'].update('')
+
+            # カメラ準備 ###############################################################
+            cap = cv.VideoCapture(cap_device)
+            cap.set(cv.CAP_PROP_FRAME_WIDTH, cap_width)
+            cap.set(cv.CAP_PROP_FRAME_HEIGHT, cap_height)
+            cap.set(cv.CAP_PROP_FPS, 60)
+
+            # モデルロード #############################################################
+            mp_hands = mp.solutions.hands
+            hands = mp_hands.Hands(
+                model_complexity=model_complexity,
+                max_num_hands=max_num_hands,
+                min_detection_confidence=min_detection_confidence,
+                min_tracking_confidence=min_tracking_confidence,
+            )
+
+            # FPS計測モジュール ########################################################
+            cvFpsCalc = CvFpsCalc(buffer_len=10)
+
+            recording = False
+            practice = True
+            standard_length = 0
+
+        if practice:
+            
+            display_fps = cvFpsCalc.get()
+
+            # カメラキャプチャ #####################################################
+            ret, image = cap.read()
+
+            if not ret:
+                break
+
+            image = cv.flip(image, 1)  # ミラー表示
+            debug_image = copy.deepcopy(image)
+
+            # 検出実施 #############################################################
+            image = cv.cvtColor(image, cv.COLOR_BGR2RGB)
+            results = hands.process(image)
+            
+            # 描画 ################################################################
+            if results.multi_hand_landmarks is not None:
+                for hand_landmarks, handedness in zip(results.multi_hand_landmarks,
+                                                        results.multi_handedness):
+                    # 手の平重心計算
+                    cx, cy, cz = calc_palm_moment(debug_image, hand_landmarks)
+                    # 描画
+                    debug_image = draw_landmarks(debug_image, cx, cy,
+                                                    hand_landmarks, handedness)
+                    # 被験者の手首と小指の付け根の長さの設定####################################
+                    tentative_length = sandard_length_setting(debug_image, hand_landmarks)
+                    cv.putText(debug_image, "distance:" + str(tentative_length), (10, 100),
+                                        cv.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 0), 2, cv.LINE_AA)
+                    #print(tentative_length)
+
+                    if event == '-set-':
+                        calibration_list = []
+
+                        window['-text-'].update('Set OK')
+
+                        standard_length = tentative_length
+                        print(standard_length)
+
+                        calibration_list.extend(['','','',standard_length])
+
+                        practice = False
+
+                        cap.release()
+                        cv.destroyAllWindows()
+                    
+            cv.putText(debug_image, "FPS:" + str(display_fps), (10, 30),
+                        cv.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2, cv.LINE_AA)
+                        
+            # 画面反映 #############################################################
+            #cv.imshow('MediaPipe Hand Demo', debug_image)
+            imgbytes = cv.imencode('.png', debug_image)[1].tobytes()
+            window['-image-'].update(data=imgbytes)
+        
+
+        if recording:
+
+            display_fps = cvFpsCalc.get()
+
+            # カメラキャプチャ #####################################################
+            ret, image = cap.read()
+
+            if not ret:
+                break
+
+            image = cv.flip(image, 1)  # ミラー表示
+            debug_image = copy.deepcopy(image)
+
+            # 検出実施 #############################################################
+            image = cv.cvtColor(image, cv.COLOR_BGR2RGB)
+            results = hands.process(image)
+            
+            # 描画 ################################################################
+            if results.multi_hand_landmarks is not None:
+                for hand_landmarks, handedness in zip(results.multi_hand_landmarks,
+                                                        results.multi_handedness):
+                    if count < 1:
+                        start_time = round(time.perf_counter(), 4)  #スタートを押した時間を取得
+                        count += 1  #スタートを押した後その時間を固定するためにカウントを設けた
+
+                    end_time = round(time.perf_counter(), 4)  #毎回のフレームで時間を取得
+                    global time1
+                    time1 = round((end_time - start_time), 3)  #0秒から始まるタイマーを取得
+
+                    # 手の平重心計算
+                    cx, cy, cz = calc_palm_moment(debug_image, hand_landmarks)
+                    # 描画
+                    debug_image = draw_landmarks(debug_image, cx, cy,
+                                                    hand_landmarks, handedness)
+                    if standard_length:
+                        #print("yes:", standard_length)
+                        # 距離と速さと角度の計算
+                        debug_image = finger_coords(debug_image, standard_length, hand_landmarks)
+                    if not standard_length:
+                        standard_length = 74
+                        #print("no:", standard_length)
+                        # 距離と速さと角度の計算
+                        debug_image = finger_coords(debug_image, standard_length, hand_landmarks)
+
+                    if tap_count == 1:
+                        if tap_count2 == 0:
+                            tap_count2 = 1
+                        window['-count-'].update(tap_count2 - 1, text_color='DeepPink')
+                    
+                    if tap_count2 == 16:
+                        recording = False
+                        cap.release()
+                        cv.destroyAllWindows()
+                        sg.popup_no_buttons('CLEAR', font=('Helvetica', 140), text_color='DeepPink')
+                    
+
+            else:
+                if count < 1:
+                    start_time = round(time.perf_counter(), 4)
+                    count += 1
+
+                end_time2 = round(time.perf_counter(), 4)
+                time2 = round((end_time2 - start_time), 3)
+
+                landmark_1 = []
+                landmark_2 = []
+                landmark_3 = []
+                landmark_4 = []
+                landmark_5 = []
+                landmark_6 = []
+                landmark_7 = []
+                landmark_8 = []
+                time_list = []
+
+                data_list.append(time2)
+                distance_list.append(time2)
+                speed_list.append(time2)
+                angle_list.append(time2)
+                from_camera.append(time2)
+                data_list.extend(['','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','',''])
+                distance_list.extend(['','','',''])
+                speed_list.extend(['','','','','','','',''])
+                angle_list.extend(['','','','',''])
+                from_camera.extend(['','',''])
+
+                with open(path, 'a', newline='') as f:
+                    writer = csv.writer(f, delimiter=',')
+                    writer.writerow(data_list)
+
+                with open(path2, 'a', newline='') as f:
+                    writer = csv.writer(f, delimiter=',')
+                    writer.writerow(distance_list)
+                
+                #print("No hand = ", speed_list)
+                with open(path3, 'a', newline='') as f:
+                    writer = csv.writer(f, delimiter=',')
+                    writer.writerow(speed_list)
+
+                with open(path4, 'a', newline='') as f:
+                    writer = csv.writer(f, delimiter=',')
+                    writer.writerow(angle_list)
+
+                with open(path5, 'a', newline='') as f:
+                    writer = csv.writer(f, delimiter=',')
+                    writer.writerow(from_camera)
+
+                data_list = []
+                distance_list = []
+                speed_list = []
+                angle_list = []
+                from_camera = []
+
+
+            #cv.putText(debug_image, "FPS:" + str(display_fps), (10, 30),
+            #            cv.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2, cv.LINE_AA)
+                        
+            # 画面反映 #############################################################
+            #cv.imshow('MediaPipe Hand Demo', debug_image)
+            imgbytes = cv.imencode('.png', debug_image)[1].tobytes()
+            window['-image-'].update(data=imgbytes)
+
+    window.close()
+
+
+def calc_palm_moment(image, landmarks):
+    image_width, image_height = image.shape[1], image.shape[0]
+
+    palm_array = np.empty((0, 2), int)
+    z_point = []  #勝手に自分で作ったやつ
+
+    for index, landmark in enumerate(landmarks.landmark):
+        landmark_x = min(int(landmark.x * image_width), image_width - 1)
+        landmark_y = min(int(landmark.y * image_height), image_height - 1)
+        landmark_z = landmark.z * image_width
+
+        landmark_point = [np.array((landmark_x, landmark_y))]
+
+        if index == 0:  # 手首1
+            palm_array = np.append(palm_array, landmark_point, axis=0)
+            z_point.append(landmark_z)
+        if index == 1:  # 手首2
+            palm_array = np.append(palm_array, landmark_point, axis=0)
+            z_point.append(landmark_z)
+        if index == 5:  # 人差指：付け根
+            palm_array = np.append(palm_array, landmark_point, axis=0)
+            z_point.append(landmark_z)
+        if index == 9:  # 中指：付け根
+            palm_array = np.append(palm_array, landmark_point, axis=0)
+            z_point.append(landmark_z)
+        if index == 13:  # 薬指：付け根
+            palm_array = np.append(palm_array, landmark_point, axis=0)
+            z_point.append(landmark_z)
+        if index == 17:  # 小指：付け根
+            palm_array = np.append(palm_array, landmark_point, axis=0)
+            z_point.append(landmark_z)
+            #print("2  ", palm_array)
+    M = cv.moments(palm_array)
+    cx, cy = 0, 0
+    if M['m00'] != 0:
+        cx = int(M['m10'] / M['m00'])
+        cy = int(M['m01'] / M['m00'])
+
+    #cz = 重心のZ座標
+    cz = (z_point[0] + z_point[1] + z_point[2] + z_point[3] + z_point[4] + z_point[5]) / 6
+
+    return cx, cy, cz
+
+
+def sandard_length_setting(image, landmarks):
+    image_width, image_height = image.shape[1], image.shape[0]
+
+    for index, landmark in enumerate(landmarks.landmark):
+
+        x = landmark.x * image_width
+        y = landmark.y * image_height
+        z = landmark.z * image_width
+
+        if index == 0:
+            x0, y0, z0 = x, y, z
+        if index == 17:
+            x17, y17, z17 = x, y, z
+
+    tentative_length = (np.sqrt((x0 - x17)**2 + (y0 - y17)**2 + (z0 - z17)**2)) * 0.275 * 62 / 22.94761914  # 画面上での手首と小指の付け根の間の距離（mm）
+
+    return tentative_length
+
+
+def finger_coords(image, standard_length, landmarks):
+    image_width, image_height = image.shape[1], image.shape[0]
+
+    global data_list, distance_list, speed_list, angle_list, from_camera, time1, landmark_1, landmark_2, landmark_3, landmark_4, landmark_5, landmark_6, landmark_7, landmark_8, time_list, dis_list, tap_count1, tap_count2, tap_count
+
+    data_list = []
+    distance_list = []
+    speed_list = []
+    angle_list = []
+    dis_list = []
+    from_camera = []
+    data_list.append(time1)
+    distance_list.append(time1)
+    speed_list.append(time1)
+    angle_list.append(time1)
+    from_camera.append(time1)
+    
+    for index, landmark in enumerate(landmarks.landmark):
+        
+        x = landmark.x * image_width
+        y = landmark.y * image_height
+        z = landmark.z * image_width
+
+        data_list.extend([x, y, z])
+
+        if index == 0:
+            x0, y0, z0 = x, y, z
+
+        if index == 1:
+            x1, y1, z1 = x, y, z
+            landmark_1.extend([x1, y1, z1])
+            time_list.append(time1)
+
+        if index == 2:
+            x2, y2, z2 = x, y, z
+            landmark_2.extend([x2, y2, z2])
+
+        if index == 3:
+            x3, y3, z3 = x, y, z
+            landmark_3.extend([x3, y3, z3])
+
+        if index == 4:
+            x4, y4, z4 = x, y, z
+            landmark_4.extend([x4, y4, z4])
+
+        if index == 5:
+            x5, y5, z5 = x, y, z
+            landmark_5.extend([x5, y5, z5])
+
+        if index == 6:
+            x6, y6, z6 = x, y, z
+            landmark_6.extend([x6, y6, z6])
+
+        if index == 7:
+            x7, y7, z7 = x, y, z
+            landmark_7.extend([x7, y7, z7])
+
+        if index == 8:
+            x8, y8, z8 = x, y, z
+            landmark_8.extend([x8, y8, z8])
+
+        if index == 17:
+            x17, y17, z17 = x, y, z
+
+    with open(path, 'a', newline='') as f:
+        writer = csv.writer(f, delimiter=',')
+        writer.writerow(data_list)
+
+    # ThumbとIndexのTIP, DIP, PIP, MCP同士を結んだ直線の距離を求める（単位はmm） ############################################################
+    tip_distance_mm = np.sqrt((x4 - x8)**2 + (y4 - y8)**2 + (z4 - z8)**2) * 0.275 # 親指：指先　   と　人差指：指先     ...画面上の距離（mm）
+    dip_distance_mm = np.sqrt((x3 - x7)**2 + (y3 - y7)**2 + (z3 - z7)**2) * 0.275 # 親指：第2関節　と　人差指：第2関節  ...画面上の距離（mm）
+    pip_distance_mm = np.sqrt((x2 - x6)**2 + (y2 - y6)**2 + (z2 - z6)**2) * 0.275 # 親指：第1関節　と　人差指：第1関節  ...画面上の距離（mm）
+    mcp_distance_mm = np.sqrt((x1 - x5)**2 + (y1 - y5)**2 + (z1 - z5)**2) * 0.275 # 親指：付け根　 と　人差指：付け根   ...画面上の距離（mm）
+
+
+    #distance_list.extend([tip_distance, dip_distance, pip_distance, mcp_distance])
+
+    # 手首と小指の付け根の長さの比からカメラとの距離を求める ###############
+    display_length_mm =  np.sqrt((x0 - x17)**2 + (y0 - y17)**2 + (z0 - z17)**2) * 0.275  #手首と小指の付け根の画面上での距離（mm）#######
+    distance_from_camera = 108.11*((display_length_mm / standard_length) ** (-1.029))  # standard_length = 80(俺の場合) →→ 人によって違うから最初にキャリブレーションする
+    magnification = 0.0086 * distance_from_camera + 0.1244  # この数値を画面上の距離（mm）:length_mmにかけると実際の被写体の距離が求められる
+    real_length_mm = display_length_mm * magnification  #画面上の被写体 と 被写体のカメラからの距離 から "実際の被写体のサイズ" を求めている！！
+    
+    cv.putText(image, str('from camera:') + str(round(distance_from_camera, 3)), (10, 60),
+                        cv.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2, cv.LINE_AA)
+
+    """
+    cv.putText(image, str('display length:') + str(round(display_length_mm, 3)), (10, 100),
+                        cv.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2, cv.LINE_AA)
+    cv.putText(image, str('real length:') + str(round(real_length_mm, 3)), (10, 130),
+                        cv.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2, cv.LINE_AA)
+    cv.putText(image, str('real ratio:') + str(round(display_length_mm/standard_length, 3)), (10, 160),
+                        cv.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2, cv.LINE_AA)
+    cv.putText(image, str('real z:') + str(round(z17*0.275, 3)), (10, 190),
+                        cv.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2, cv.LINE_AA)
+    """
+
+    # カメラからの距離による倍率をかける
+    real_tip_distance_mm = tip_distance_mm * magnification
+    real_dip_distance_mm = dip_distance_mm * magnification
+    real_pip_distance_mm = pip_distance_mm * magnification
+    real_mcp_distance_mm = mcp_distance_mm * magnification
+
+    distance_list.extend([real_tip_distance_mm, real_dip_distance_mm, real_pip_distance_mm, real_mcp_distance_mm])
+    #print(display_fps)
+    from_camera.extend([distance_from_camera, display_fps,''])
+
+    """
+    cv.putText(image, str('display_tip:') + str(round(tip_distance_mm, 3)), (10, 230),
+                        cv.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2, cv.LINE_AA)
+    cv.putText(image, str('real_tip:') + str(round(real_tip_distance_mm, 3)), (10, 260),
+                        cv.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2, cv.LINE_AA)
+    cv.putText(image, str('tip ratio:') + str(round(tip_distance_mm/real_tip_distance_mm, 3)), (10, 290),
+                        cv.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2, cv.LINE_AA)
+    cv.putText(image, str('thumb tip z:') + str(round(z4*0.275, 3)), (10, 320),
+                        cv.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2, cv.LINE_AA)
+    cv.putText(image, str('index tip z:') + str(round(z8*0.275, 3)), (10, 350),
+                        cv.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2, cv.LINE_AA)
+
+    cv.putText(image, str('wristz:') + str(round(z0, 3)), (10, 30),
+                        cv.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2, cv.LINE_AA)
+    """
+
+    # タップしたカウントを数える
+    if real_tip_distance_mm <= 25:  # 指をくっつけたとき親指と人差指の先端の距離が25mm以下になるはず
+        tap_count = 0
+        tap_count1 += 1
+        #print("yes")
+    
+    if tap_count1 >= 1 and real_tip_distance_mm >= 50:  # 指をくっつけて離すとき親指と人差指の先端の距離が50mm以上になったら1タップとみなす
+        tap_count += 1
+        tap_count2 += 1
+        #print("yeah")
+        tap_count1 = 0
+    
+    """
+    cv.putText(image, str('real0_17:') + str(round(real_length_mm, 3)), (10, 150),
+                        cv.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 0), 2, cv.LINE_AA)
+    cv.putText(image, str('real_tip:') + str(round(real_tip_distance_mm, 3)), (10, 200),
+                        cv.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 0), 2, cv.LINE_AA)
+    cv.putText(image, str('real_dip:') + str(round(real_dip_distance_mm, 3)), (10, 250),
+                        cv.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 0), 2, cv.LINE_AA)
+    cv.putText(image, str('real_pip:') + str(round(real_pip_distance_mm, 3)), (10, 300),
+                        cv.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 0), 2, cv.LINE_AA)
+    cv.putText(image, str('real_mcp:') + str(round(real_mcp_distance_mm, 3)), (10, 350),
+                        cv.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 0), 2, cv.LINE_AA)
+    """
+
+    with open(path2, 'a', newline='') as f:
+        writer = csv.writer(f, delimiter=',')
+        writer.writerow(distance_list)
+
+    with open(path5, 'a', newline='') as f:
+        writer = csv.writer(f, delimiter=',')
+        writer.writerow(from_camera)
+
+
+    # ThumbとIndexの各関節の速さを求める ######################################################################################
+    #print(len(landmark_1))
+    if len(landmark_1) == 6:
+        #print("landamrk_1 = ", landmark_1)
+        # ランドマーク１～８のフレーム前後の移動距離(mm)
+        distance_1 = np.sqrt((landmark_1[0] - landmark_1[3])**2 + (landmark_1[1] - landmark_1[4])**2 + (landmark_1[2] - landmark_1[5])**2) * 0.275  # 親指：付け根     ...画面上の距離（mm）
+        distance_2 = np.sqrt((landmark_2[0] - landmark_2[3])**2 + (landmark_2[1] - landmark_2[4])**2 + (landmark_2[2] - landmark_2[5])**2) * 0.275  # 親指：第1関節    ...画面上の距離（mm）
+        distance_3 = np.sqrt((landmark_3[0] - landmark_3[3])**2 + (landmark_3[1] - landmark_3[4])**2 + (landmark_3[2] - landmark_3[5])**2) * 0.275  # 親指：第2関節    ...画面上の距離（mm）
+        distance_4 = np.sqrt((landmark_4[0] - landmark_4[3])**2 + (landmark_4[1] - landmark_4[4])**2 + (landmark_4[2] - landmark_4[5])**2) * 0.275  # 親指：指先       ...画面上の距離（mm）
+        distance_5 = np.sqrt((landmark_5[0] - landmark_5[3])**2 + (landmark_5[1] - landmark_5[4])**2 + (landmark_5[2] - landmark_5[5])**2) * 0.275  # 人差指：付け根   ...画面上の距離（mm）
+        distance_6 = np.sqrt((landmark_6[0] - landmark_6[3])**2 + (landmark_6[1] - landmark_6[4])**2 + (landmark_6[2] - landmark_6[5])**2) * 0.275  # 人差指：第1関節  ...画面上の距離（mm）
+        distance_7 = np.sqrt((landmark_7[0] - landmark_7[3])**2 + (landmark_7[1] - landmark_7[4])**2 + (landmark_7[2] - landmark_7[5])**2) * 0.275  # 人差指：第2関節  ...画面上の距離（mm）
+        distance_8 = np.sqrt((landmark_8[0] - landmark_8[3])**2 + (landmark_8[1] - landmark_8[4])**2 + (landmark_8[2] - landmark_8[5])**2) * 0.275  # 人差指：指先     ...画面上の距離（mm）
+        time_frame = time_list[1] - time_list[0]
+
+        real_distance_mm_1 = distance_1 * magnification
+        real_distance_mm_2 = distance_2 * magnification
+        real_distance_mm_3 = distance_3 * magnification
+        real_distance_mm_4 = distance_4 * magnification
+        real_distance_mm_5 = distance_5 * magnification
+        real_distance_mm_6 = distance_6 * magnification
+        real_distance_mm_7 = distance_7 * magnification
+        real_distance_mm_8 = distance_8 * magnification
+
+        # ランドマーク１～８のフレーム前後の移動速度
+        speed_1 = real_distance_mm_1 / time_frame
+        speed_2 = real_distance_mm_2 / time_frame
+        speed_3 = real_distance_mm_3 / time_frame
+        speed_4 = real_distance_mm_4 / time_frame
+        speed_5 = real_distance_mm_5 / time_frame
+        speed_6 = real_distance_mm_6 / time_frame
+        speed_7 = real_distance_mm_7 / time_frame
+        speed_8 = real_distance_mm_8 / time_frame
+
+        
+        speed_list.extend([speed_1, speed_2, speed_3, speed_4, speed_5, speed_6, speed_7, speed_8])
+        #print("Yes hand = ", speed_list)
+        with open(path3, 'a', newline='') as f:
+            writer = csv.writer(f, delimiter=',')
+            writer.writerow(speed_list)
+
+        landmark_1 = []
+        landmark_2 = []
+        landmark_3 = []
+        landmark_4 = []
+        landmark_5 = []
+        landmark_6 = []
+        landmark_7 = []
+        landmark_8 = []
+        time_list = []
+        #print(len(landmark_1))
+
+        landmark_1.extend([x1, y1, z1])
+        landmark_2.extend([x2, y2, z2])
+        landmark_3.extend([x3, y3, z3])
+        landmark_4.extend([x4, y4, z4])
+        landmark_5.extend([x5, y5, z5])
+        landmark_6.extend([x6, y6, z6])
+        landmark_7.extend([x7, y7, z7])
+        landmark_8.extend([x8, y8, z8])
+        time_list.append(time1)
+        #print(len(landmark_1))
+
+
+    # ThumbとIndexの関節間の角度を求める ############################################################################################
+     # ランドマーク１－２から７－８のベクトル
+    vec_1_2 = [(x2-x1)*0.275*magnification, (y2-y1)*0.275*magnification, (z2-z1)*0.275*magnification]
+    vec_2_3 = [(x3-x2)*0.275*magnification, (y3-y2)*0.275*magnification, (z3-z2)*0.275*magnification]
+    vec_3_4 = [(x4-x3)*0.275*magnification, (y4-y3)*0.275*magnification, (z4-z3)*0.275*magnification]
+    vec_0_5 = [(x5-x0)*0.275*magnification, (y5-y0)*0.275*magnification, (z5-z0)*0.275*magnification]
+    vec_5_6 = [(x6-x5)*0.275*magnification, (y6-y5)*0.275*magnification, (z6-z5)*0.275*magnification]
+    vec_6_7 = [(x7-x6)*0.275*magnification, (y7-y6)*0.275*magnification, (z7-z6)*0.275*magnification]
+    vec_7_8 = [(x8-x7)*0.275*magnification, (y8-y7)*0.275*magnification, (z8-z7)*0.275*magnification]
+
+    # 上で求めたベクトルの大きさ
+    absvec_1_2 = np.linalg.norm(vec_1_2)
+    absvec_2_3 = np.linalg.norm(vec_2_3)
+    absvec_3_4 = np.linalg.norm(vec_3_4)
+    absvec_0_5 = np.linalg.norm(vec_0_5)
+    absvec_5_6 = np.linalg.norm(vec_5_6)
+    absvec_6_7 = np.linalg.norm(vec_6_7)
+    absvec_7_8 = np.linalg.norm(vec_7_8)
+
+    # ベクトル間の内積
+    inner_1_3 = np.inner(vec_1_2, vec_2_3)
+    inner_2_4 = np.inner(vec_2_3, vec_3_4)
+    inner_0_6 = np.inner(vec_0_5, vec_5_6)
+    inner_5_7 = np.inner(vec_5_6, vec_6_7)
+    inner_6_8 = np.inner(vec_6_7, vec_7_8)
+
+    # ベクトル間の外積
+    cross_1_3 = np.cross(vec_1_2, vec_2_3)
+    cross_x = cross_1_3[0]
+    cross_y = cross_1_3[1]
+    cross_z = cross_1_3[2]
+    #print(cross_1_3)
+    
+    """
+    cv.putText(image, str('cross_x:') + str(cross_x), (10, 100),
+                        cv.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 0), 2, cv.LINE_AA)
+    cv.putText(image, str('cross_y:') + str(cross_y), (10, 150),
+                        cv.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 0), 2, cv.LINE_AA)
+    cv.putText(image, str('cross_z:') + str(cross_z), (10, 200),
+                        cv.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 0), 2, cv.LINE_AA)
+    """
+
+    # 角度の計算
+    angle_1_3 = math.degrees(math.acos(inner_1_3 / (absvec_1_2 * absvec_2_3)))
+    angle_2_4 = math.degrees(math.acos(inner_2_4 / (absvec_2_3 * absvec_3_4)))
+    angle_0_6 = math.degrees(math.acos(inner_0_6 / (absvec_0_5 * absvec_5_6)))
+    angle_5_7 = math.degrees(math.acos(inner_5_7 / (absvec_5_6 * absvec_6_7)))
+    angle_6_8 = math.degrees(math.acos(inner_6_8 / (absvec_6_7 * absvec_7_8)))
+
+    # 角度の保存
+
+    """
+    cv.putText(image, "1_3: "+str(angle_1_3), (10, 60),
+                        cv.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2, cv.LINE_AA)
+    cv.putText(image, "2_4: "+str(angle_2_4), (10, 90),
+                        cv.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2, cv.LINE_AA)
+    cv.putText(image, "0_6: "+str(angle_0_6), (10, 120),
+                        cv.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2, cv.LINE_AA)
+    cv.putText(image, "5_7: "+str(angle_5_7), (10, 150),
+                        cv.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2, cv.LINE_AA)
+    cv.putText(image, "6_8: "+str(angle_6_8), (10, 180),
+                        cv.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2, cv.LINE_AA)
+    """
+
+    angle_list.extend([angle_1_3, angle_2_4, angle_0_6, angle_5_7, angle_6_8])
+    #print(angle_list)
+    with open(path4, 'a', newline='') as f:
+            writer = csv.writer(f, delimiter=',')
+            writer.writerow(angle_list)
+
+
+    data_list = []
+    distance_list = []
+    speed_list = []
+    angle_list = []
+    from_camera = []
+    
+
+        
+    return image
+
+
+def draw_landmarks(image, cx, cy, landmarks, handedness):
+    image_width, image_height = image.shape[1], image.shape[0]
+
+    landmark_point = []
+
+    # キーポイント
+    for index, landmark in enumerate(landmarks.landmark):
+        if landmark.visibility < 0 or landmark.presence < 0:
+            continue
+
+        landmark_x = min(int(landmark.x * image_width), image_width - 1)
+        landmark_y = min(int(landmark.y * image_height), image_height - 1)
+
+        landmark_point.append((landmark_x, landmark_y))
+        
+        if index == 0:  # 手首1
+            cv.circle(image, (landmark_x, landmark_y), 5, (0, 255, 0), 2)
+        if index == 1:  # 手首2
+            cv.circle(image, (landmark_x, landmark_y), 5, (0, 255, 0), 2)
+        if index == 2:  # 親指：付け根
+            cv.circle(image, (landmark_x, landmark_y), 5, (0, 255, 0), 2)
+        if index == 3:  # 親指：第1関節
+            cv.circle(image, (landmark_x, landmark_y), 5, (0, 255, 0), 2)
+        if index == 4:  # 親指：指先
+            cv.circle(image, (landmark_x, landmark_y), 5, (0, 255, 0), 2)
+            cv.circle(image, (landmark_x, landmark_y), 12, (0, 255, 0), 2)
+        
+        if index == 5:  # 人差指：付け根
+            cv.circle(image, (landmark_x, landmark_y), 5, (0, 255, 0), 2)
+        if index == 6:  # 人差指：第2関節
+            cv.circle(image, (landmark_x, landmark_y), 5, (0, 255, 0), 2)
+        if index == 7:  # 人差指：第1関節
+            cv.circle(image, (landmark_x, landmark_y), 5, (0, 255, 0), 2)
+        if index == 8:  # 人差指：指先
+            cv.circle(image, (landmark_x, landmark_y), 5, (0, 255, 0), 2)
+            cv.circle(image, (landmark_x, landmark_y), 12, (0, 255, 0), 2)
+        
+        if index == 9:  # 中指：付け根
+            cv.circle(image, (landmark_x, landmark_y), 5, (0, 255, 0), 2)
+        if index == 10:  # 中指：第2関節
+            cv.circle(image, (landmark_x, landmark_y), 5, (0, 255, 0), 2)
+        if index == 11:  # 中指：第1関節
+            cv.circle(image, (landmark_x, landmark_y), 5, (0, 255, 0), 2)
+        if index == 12:  # 中指：指先
+            cv.circle(image, (landmark_x, landmark_y), 5, (0, 255, 0), 2)
+            #cv.circle(image, (landmark_x, landmark_y), 12, (0, 255, 0), 2)
+        if index == 13:  # 薬指：付け根
+            cv.circle(image, (landmark_x, landmark_y), 5, (0, 255, 0), 2)
+        if index == 14:  # 薬指：第2関節
+            cv.circle(image, (landmark_x, landmark_y), 5, (0, 255, 0), 2)
+        if index == 15:  # 薬指：第1関節
+            cv.circle(image, (landmark_x, landmark_y), 5, (0, 255, 0), 2)
+        if index == 16:  # 薬指：指先
+            cv.circle(image, (landmark_x, landmark_y), 5, (0, 255, 0), 2)
+            #cv.circle(image, (landmark_x, landmark_y), 12, (0, 255, 0), 2)
+        if index == 17:  # 小指：付け根
+            cv.circle(image, (landmark_x, landmark_y), 5, (0, 255, 0), 2)
+        if index == 18:  # 小指：第2関節
+            cv.circle(image, (landmark_x, landmark_y), 5, (0, 255, 0), 2)
+        if index == 19:  # 小指：第1関節
+            cv.circle(image, (landmark_x, landmark_y), 5, (0, 255, 0), 2)
+        if index == 20:  # 小指：指先
+            cv.circle(image, (landmark_x, landmark_y), 5, (0, 255, 0), 2)
+            #cv.circle(image, (landmark_x, landmark_y), 12, (0, 255, 0), 2)
+
+    # 接続線
+    if len(landmark_point) > 0:
+        # 親指
+        cv.line(image, landmark_point[2], landmark_point[3], (0, 0, 255), 2)
+        cv.line(image, landmark_point[3], landmark_point[4], (0, 0, 255), 2)
+
+        # 人差指
+        cv.line(image, landmark_point[5], landmark_point[6], (0, 0, 255), 2)
+        cv.line(image, landmark_point[6], landmark_point[7], (0, 0, 255), 2)
+        cv.line(image, landmark_point[7], landmark_point[8], (0, 0, 255), 2)
+
+        # 中指
+        cv.line(image, landmark_point[9], landmark_point[10], (0, 0, 255), 2)
+        cv.line(image, landmark_point[10], landmark_point[11], (0, 0, 255), 2)
+        cv.line(image, landmark_point[11], landmark_point[12], (0, 0, 255), 2)
+
+        # 薬指
+        cv.line(image, landmark_point[13], landmark_point[14], (0, 0, 255), 2)
+        cv.line(image, landmark_point[14], landmark_point[15], (0, 0, 255), 2)
+        cv.line(image, landmark_point[15], landmark_point[16], (0, 0, 255), 2)
+
+        # 小指
+        cv.line(image, landmark_point[17], landmark_point[18], (0, 0, 255), 2)
+        cv.line(image, landmark_point[18], landmark_point[19], (0, 0, 255), 2)
+        cv.line(image, landmark_point[19], landmark_point[20], (0, 0, 255), 2)
+
+        # 手の平
+        cv.line(image, landmark_point[0], landmark_point[1], (0, 0, 255), 2)
+        cv.line(image, landmark_point[0], landmark_point[5], (0, 0, 255), 2)
+        cv.line(image, landmark_point[1], landmark_point[2], (0, 0, 255), 2)
+        cv.line(image, landmark_point[2], landmark_point[5], (0, 0, 255), 2)
+        cv.line(image, landmark_point[5], landmark_point[9], (0, 0, 255), 2)
+        cv.line(image, landmark_point[9], landmark_point[13], (0, 0, 255), 2)
+        cv.line(image, landmark_point[13], landmark_point[17], (0, 0, 255), 2)
+        cv.line(image, landmark_point[17], landmark_point[0], (0, 0, 255), 2)
+    
+    # 重心 + 左右
+    if len(landmark_point) > 0:
+        # handedness.classification[0].index
+        # handedness.classification[0].score
+
+        cv.circle(image, (cx, cy), 5, (0, 255, 0), -1)
+        cv.putText(image, handedness.classification[0].label,
+                   (landmark_point[0][0] - 6, landmark_point[0][1] + 50), cv.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255),
+                   4, cv.LINE_AA)  # label[0]:一文字目だけ
+
+    return image
+
+def popup_graph(path2, path3, path4):
+    while True:
+        input_csv2 = pd.read_csv(path2)
+        input_csv3 = pd.read_csv(path3)
+        input_csv4 = pd.read_csv(path4)
+
+        time_data_2 = input_csv2[input_csv2.keys()[0]]
+        time_data_3 = input_csv3[input_csv3.keys()[0]]
+        time_data_4 = input_csv4[input_csv4.keys()[0]]
+
+        distance_1 = input_csv2[input_csv2.keys()[1]]
+        distance_2 = input_csv2[input_csv2.keys()[2]]
+        distance_3 = input_csv2[input_csv2.keys()[3]]
+        distance_4 = input_csv2[input_csv2.keys()[4]]
+
+        speed_1 = input_csv3[input_csv3.keys()[1]]
+        speed_2 = input_csv3[input_csv3.keys()[2]]
+        speed_3 = input_csv3[input_csv3.keys()[3]]
+        speed_4 = input_csv3[input_csv3.keys()[4]]
+        speed_5 = input_csv3[input_csv3.keys()[5]]
+        speed_6 = input_csv3[input_csv3.keys()[6]]
+        speed_7 = input_csv3[input_csv3.keys()[7]]
+        speed_8 = input_csv3[input_csv3.keys()[8]]
+
+        angle_1 = input_csv4[input_csv4.keys()[1]]
+        angle_2 = input_csv4[input_csv4.keys()[2]]
+        angle_3 = input_csv4[input_csv4.keys()[3]]
+        angle_4 = input_csv4[input_csv4.keys()[4]]
+        angle_5 = input_csv4[input_csv4.keys()[5]]
+
+        fig = plt.figure(figsize = (18, 12), facecolor = 'lightblue')
+
+        ax1 = fig.add_subplot(2, 2, 1)
+        ax2 = fig.add_subplot(2, 2, 2)
+        ax3 = fig.add_subplot(2, 2, 3)
+        ax4 = fig.add_subplot(2, 2, 4)
+
+        # グラフの表示とその凡例の表示
+        ax1.plot(time_data_2, distance_1, label = 'tip_thumb_index_distance')
+        ax1.plot(time_data_2, distance_2, label = 'dip_thumb_index_distance')
+        ax1.plot(time_data_2, distance_3, label = 'pip_thumb_index_distance')
+        ax1.plot(time_data_2, distance_4, label = 'mcp_thumb_index_distance')
+
+        ax2.plot(time_data_3, speed_1, label = 'thumb_mcp_speed')
+        ax2.plot(time_data_3, speed_2, label = 'thumb_pip_speed')
+        ax2.plot(time_data_3, speed_3, label = 'thumb_dip_speed')
+        ax2.plot(time_data_3, speed_4, label = 'thumb_tip_speed')
+
+        ax3.plot(time_data_4, angle_1, label = 'angle_1_3')
+        ax3.plot(time_data_4, angle_2, label = 'angle_2_4')
+        ax3.plot(time_data_4, angle_3, label = 'angle_0_6')
+        ax3.plot(time_data_4, angle_4, label = 'angle_5_7')
+        ax3.plot(time_data_4, angle_5, label = 'angle_6_8')
+
+        ax4.plot(time_data_3, speed_5, label = 'index_mcp_speed')
+        ax4.plot(time_data_3, speed_6, label = 'index_pip_speed')
+        ax4.plot(time_data_3, speed_7, label = 'index_dip_speed')
+        ax4.plot(time_data_3, speed_8, label = 'index_tip_speed')
+
+        # グラフのタイトル
+        ax1.set_title('FINGER_DISTANCE')
+        ax2.set_title('THUMB_FINGER_SPEED')
+        ax3.set_title('FINGER_ANGLE')
+        ax4.set_title('INDEX_FINGER_SPEED')
+
+        # グラフのx軸とy軸のラベルの表示
+        ax1.set_xlabel('time')
+        ax1.set_ylabel('distance')
+        ax2.set_xlabel('time')
+        ax2.set_ylabel('speed')
+        ax3.set_xlabel('time')
+        ax3.set_ylabel('angle')
+        ax4.set_xlabel('time')
+        ax4.set_ylabel('speed')
+
+        # グリッドON
+        ax1.grid(True)
+        ax2.grid(True)
+        ax3.grid(True)
+        ax4.grid(True)
+
+        # ラベルとか表示
+        ax1.legend(loc = 'upper right')
+        ax2.legend(loc = 'upper right')
+        ax3.legend(loc = 'upper right')
+        ax4.legend(loc = 'upper right')
+
+        plt.show()
+
+        break
+
+
+if __name__ == '__main__':
+    main()
